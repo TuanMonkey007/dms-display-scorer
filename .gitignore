@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+records.json
+tier1.json
+full/
+D:/data/
+.env
