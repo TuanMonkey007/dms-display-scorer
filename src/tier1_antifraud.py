@@ -42,7 +42,7 @@ def blur_var(gray):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
-    ap.add_argument("--moire-th", type=float, default=0.8)
+    ap.add_argument("--moire-th", type=float, default=0.9)
     ap.add_argument("--blur-th", type=float, default=30.0)
     a = ap.parse_args(argv)
     tier = json.load(open(os.path.join(a.dir, "tier1.json"), encoding="utf-8"))
