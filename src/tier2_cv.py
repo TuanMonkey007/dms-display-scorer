@@ -38,7 +38,25 @@ SIM_MIN = 0.65            # cosine tối thiểu với ảnh mẫu
 NEG_MARGIN = 0.0         # sim với SKU phải lớn hơn sim với 'OTHER' ngần này
 SIM_MARGIN = 0.05         # phải hơn SKU khác ít nhất ngần này
 
+CLF_FILE = os.path.join(BASE_DIR, "models", "clf.pt")
+CLF_MIN_PROB = 0.6        # xác suất tối thiểu của bộ phân loại đã huấn luyện (labeling.py)
 _models = {}
+_clf = {"mtime": None, "data": None}
+
+
+def get_classifier():
+    """Bộ phân loại huấn luyện từ crop đã gán nhãn (tự nạp lại khi file đổi). None nếu chưa có."""
+    if not os.path.exists(CLF_FILE):
+        return None
+    mt = os.path.getmtime(CLF_FILE)
+    if _clf["mtime"] != mt:
+        _clf["data"] = torch.load(CLF_FILE, map_location="cpu")
+        _clf["mtime"] = mt
+    return _clf["data"]
+
+
+def reset_classifier():
+    _clf["mtime"] = None
 
 
 def _device():
@@ -165,7 +183,7 @@ def _nms(boxes, scores, thr):
     return keep
 
 
-def _propose(pil):
+def _propose(pil, threshold=None):
     """Đề xuất box gói bánh. Trả về mảng [N,4] pixel (x1,y1,x2,y2) + điểm."""
     m = _load_models()
     W, H = pil.size
@@ -174,7 +192,7 @@ def _propose(pil):
         out = m["owl"](**inp)
     S = max(W, H)  # OWLv2 pad ảnh thành vuông ở góc trên-trái
     res = m["owl_p"].post_process_object_detection(
-        out, threshold=PROPOSAL_THRESHOLD, target_sizes=torch.tensor([[S, S]]))[0]
+        out, threshold=threshold or PROPOSAL_THRESHOLD, target_sizes=torch.tensor([[S, S]]))[0]
     boxes = res["boxes"].numpy().astype(np.float32)
     scores = res["scores"].numpy().astype(np.float32)
     if not len(boxes):
@@ -200,6 +218,15 @@ def _classify(pil, boxes, protos, sku_names, negs=None):
         px, py = 0.03 * (x2 - x1), 0.03 * (y2 - y1)
         crops.append(pil.crop((max(0, x1 - px), max(0, y1 - py), min(W, x2 + px), min(H, y2 + py))))
     ce = _embed_images(crops)                                  # [N, D]
+    clf = get_classifier()
+    if clf is not None:
+        prob = torch.softmax(ce @ clf["W"] * 20 + clf["b"], dim=1)
+        res = []
+        for i in range(len(boxes)):
+            k = int(prob[i].argmax()); code = clf["classes"][k]; pr = float(prob[i, k])
+            res.append({"box": [float(v) for v in boxes[i]], "sku": code, "sim": pr, "margin": pr, "neg": 0.0,
+                        "is_match": code in sku_names and pr >= CLF_MIN_PROB})
+        return res
     codes = list(protos.keys())
     sku_sim = torch.stack([(ce @ protos[c].T).max(dim=1).values for c in codes], dim=1)  # [N, K]
     neg_sim = (ce @ negs.T).max(dim=1).values if negs is not None else torch.full((len(boxes),), -1.0)
@@ -278,8 +305,8 @@ def detect_products_in_image(img_path, program_config=None):
     if not skus:
         return _empty("Chưa cấu hình SKU/ảnh mẫu cho chương trình này")
     protos = _sku_prototypes(skus)
-    if not protos:
-        return _empty("Chưa có ảnh bao bì mẫu cho các SKU")
+    if not protos and get_classifier() is None:
+        return _empty("Chưa có ảnh bao bì mẫu hay dữ liệu gán nhãn cho các SKU")
     negs = _load_negatives(skus)
     names = {s["sku_code"]: s.get("sku_name", s["sku_code"]) for s in skus}
 

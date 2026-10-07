@@ -25,6 +25,11 @@ import http.cookiejar
 import webbrowser
 import base64
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+try:
+    import cv2
+    HAVE_CV2 = True
+except ImportError:
+    HAVE_CV2 = False
 
 BASE = "http://huunghiv2.dmsone.vn"
 IMG_BASE = "http://huunghiv2.dmsone.vn:8080/huunghi"
@@ -45,6 +50,18 @@ try:
 except Exception:
     pass
 DEFAULT_OUTPUT_DIR = os.path.join(BASE_DIR, "data", "displays")
+try:
+    import labeling
+except Exception as _e:
+    labeling = None
+    print("⚠️ Không nạp được labeling:", _e)
+
+def _inject_label_tab(html):
+    try:
+        frag = open(os.path.join(BASE_DIR, "src", "label_tab.html"), encoding="utf-8").read()
+    except Exception:
+        frag = ""
+    return html.replace("<!--LABEL_TAB-->", frag)
 
 class _Redirect(Exception):
     def __init__(self, location):
@@ -500,6 +517,9 @@ HTML_UI = """<!DOCTYPE html>
                 <button onclick="switchMainTab('config')" id="tabBtnConfig" class="px-4 py-1.5 font-semibold text-blue-100 hover:text-white rounded-lg transition">
                     ⚙️ 3. Cấu hình SKU & Quy tắc
                 </button>
+                <button onclick="switchMainTab('label')" id="tabBtnLabel" class="px-4 py-1.5 font-semibold text-blue-100 hover:text-white rounded-lg transition">
+                    🏷️ 4. Gán nhãn sản phẩm
+                </button>
             </div>
 
             <div class="flex items-center gap-3 text-xs bg-black/20 px-3.5 py-1.5 rounded-xl backdrop-blur-sm border border-white/10">
@@ -952,11 +972,13 @@ HTML_UI = """<!DOCTYPE html>
             const viewIngest = document.getElementById("viewIngest");
             const viewAudit = document.getElementById("viewAudit");
             const viewConfig = document.getElementById("viewConfig");
+            const btnLabel = document.getElementById("tabBtnLabel");
+            const viewLabel = document.getElementById("viewLabel");
 
-            [btnIngest, btnAudit, btnConfig].forEach(b => {
+            [btnIngest, btnAudit, btnConfig, btnLabel].forEach(b => {
                 b.className = "px-4 py-1.5 font-semibold text-blue-100 hover:text-white rounded-lg transition";
             });
-            [viewIngest, viewAudit, viewConfig].forEach(v => v.classList.add("hidden"));
+            [viewIngest, viewAudit, viewConfig, viewLabel].forEach(v => v.classList.add("hidden"));
 
             if (tab === 'ingest') {
                 viewIngest.classList.remove("hidden");
@@ -969,6 +991,10 @@ HTML_UI = """<!DOCTYPE html>
                 viewConfig.classList.remove("hidden");
                 btnConfig.className = "px-4 py-1.5 font-bold rounded-lg bg-white text-blue-700 shadow-sm transition";
                 loadAllConfigs();
+            } else if (tab === 'label') {
+                viewLabel.classList.remove("hidden");
+                btnLabel.className = "px-4 py-1.5 font-bold rounded-lg bg-white text-blue-700 shadow-sm transition";
+                loadLabelTab();
             }
         }
 
@@ -1932,6 +1958,7 @@ HTML_UI = """<!DOCTYPE html>
             return (text || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
         }
     </script>
+<!--LABEL_TAB-->
 </body>
 </html>
 """
@@ -1954,7 +1981,7 @@ class DMSWebHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(HTML_UI.encode("utf-8"))
+            self.wfile.write(_inject_label_tab(HTML_UI).encode("utf-8"))
 
         elif url.path == "/api/auth_status":
             self._send_json({"logged_in": SERVER_STATE["dms_client"] is not None, "user": SERVER_STATE["user"]})
@@ -2189,6 +2216,23 @@ class DMSWebHandler(BaseHTTPRequestHandler):
             self.end_headers()
             with open(full_path, "rb") as f: self.wfile.write(f.read())
 
+        elif url.path in ("/api/label_images", "/api/label_proposals", "/api/label_stats"):
+            if labeling is None:
+                return self._send_json({"error": "Chưa cài đủ thư viện AI (torch/transformers)"}, status=500)
+            try:
+                if url.path == "/api/label_stats":
+                    self._send_json(labeling.stats())
+                else:
+                    rel_dir = qs.get("dir", [""])[0]
+                    if not rel_dir or ".." in rel_dir: return self._send_json({"error": "dir sai"}, status=400)
+                    if url.path == "/api/label_images":
+                        self._send_json(labeling.list_images(DEFAULT_OUTPUT_DIR, rel_dir))
+                    else:
+                        self._send_json(labeling.propose(DEFAULT_OUTPUT_DIR, rel_dir, qs.get("imageId", [""])[0],
+                                                         force=bool(qs.get("force"))))
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+
         elif url.path == "/api/open_folder":
             os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
             if sys.platform == "darwin": os.system(f'open "{DEFAULT_OUTPUT_DIR}"')
@@ -2358,6 +2402,20 @@ class DMSWebHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
 
+        elif url.path in ("/api/label_save", "/api/label_train"):
+            if labeling is None:
+                return self._send_json({"ok": False, "error": "Chưa cài đủ thư viện AI"}, status=500)
+            try:
+                if url.path == "/api/label_save":
+                    rel_dir = body.get("dir", "")
+                    if not rel_dir or ".." in rel_dir: return self._send_json({"ok": False, "error": "dir sai"}, status=400)
+                    n = labeling.save_labels(DEFAULT_OUTPUT_DIR, rel_dir, str(body.get("imageId", "")), body.get("items", []))
+                    self._send_json({"ok": True, "saved": n})
+                else:
+                    self._send_json(dict(labeling.train(), ok=True))
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
+
         elif url.path == "/api/rotate_image":
             rel_dir = body.get("dir", "")
             img_id = str(body.get("imageId", ""))
@@ -2389,6 +2447,8 @@ class DMSWebHandler(BaseHTTPRequestHandler):
                     else:
                         subprocess.run(["sips", "-r", str(angle), img_path, "--out", img_path], capture_output=True)
 
+                    if body.get("rescore") is False:   # tab gán nhãn: chỉ xoay file, khỏi chấm lại AI
+                        return self._send_json({"ok": True})
                     res = detect_products_in_image(img_path)
                     res["imageId"] = img_id
                     res["file"] = target_item["file"]
@@ -2477,7 +2537,8 @@ def run_server(port=8888):
     print(f"👉 http://127.0.0.1:{actual_port}")
     print("=" * 65)
 
-    webbrowser.open(f"http://127.0.0.1:{actual_port}")
+    if not os.environ.get("DMS_NO_BROWSER"):
+        webbrowser.open(f"http://127.0.0.1:{actual_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

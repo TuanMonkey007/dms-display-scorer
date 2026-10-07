@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dms-tool",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["DMS_NO_BROWSER=1", ".venv/bin/python", "app.py"],
+      "port": 8888
+    }
+  ]
+}
