@@ -6,3 +6,7 @@ full/
 data/
 D:/data/
 .env
+
+.venv/
+.DS_Store
+models/

@@ -183,7 +183,17 @@ def main(argv):
     print(f"programs: {len(progs)}")
     for p in progs:
         pid = p["displayProgrameId"]
-        outdir = os.path.join(a.out, f"{a.frm.replace('/','')}-{a.to.replace('/','')}", pid)
+        pcode = p.get("code", pid)
+        clean_code = pcode.split(" - ")[0].strip() if " - " in pcode else pcode.strip()
+        clean_code = re.sub(r'[\/*?:"<>|\s]', "_", clean_code).strip("_")
+        folder_name = f"{pid}_{clean_code}" if clean_code else str(pid)
+        outdir = os.path.join(a.out, f"{a.frm.replace('/','')}-{a.to.replace('/','')}", folder_name)
+        old_dir = os.path.join(a.out, f"{a.frm.replace('/','')}-{a.to.replace('/','')}", pid)
+        if os.path.exists(old_dir) and not os.path.exists(outdir):
+            try:
+                os.rename(old_dir, outdir)
+            except Exception:
+                pass
         os.makedirs(outdir, exist_ok=True)
         jf = os.path.join(outdir, "records.json")
         seen = set()
