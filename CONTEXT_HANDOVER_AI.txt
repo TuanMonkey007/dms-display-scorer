@@ -1,0 +1,140 @@
+================================================================================
+TÀI LIỆU BÀN GIAO CONTEXT DỰ ÁN: DMS DISPLAY SCORER & AI VISION (HỮU NGHỊ FOOD)
+================================================================================
+Ngày cập nhật: 07/10/2026
+Môi trường triển khai: macOS Apple Silicon M4 (Hà Nội, Việt Nam)
+Đường dẫn dự án: /Users/tuannm/TUANNM/01.HNF/02. DMS/Yêu Cầu Bất Ngờ /dms-display-scorer/
+
+--------------------------------------------------------------------------------
+1. TỔNG QUAN & BỐI CẢNH NGHIỆP VỤ
+--------------------------------------------------------------------------------
+- Khách hàng: Công ty Cổ phần Thực phẩm Hữu Nghị (HNF).
+- Hệ thống nguồn: Viettel DMS.ONE phiên bản web (http://huunghiv2.dmsone.vn).
+- Mục tiêu dự án:
+  Xây dựng một bộ công cụ độc lập, tự vận hành cục bộ trên máy tính (macOS Apple Silicon M4 / Windows),
+  không can thiệp server hay cơ sở dữ liệu DMS.ONE. Công cụ thực hiện các chức năng chính:
+  1. Tự động crawl/tải toàn bộ ảnh chấm trưng bày theo kỳ chương trình từ DMS.
+  2. Kiểm tra gian lận Tầng 1 (GPS Haversine, Moiré FFT màn hình, phát hiện ảnh trùng lặp đa điểm bán).
+  3. Chấm điểm Tầng 2 bằng AI Computer Vision (Object Detection):
+     Phát hiện chính xác từng bao bì sản phẩm trên kệ, khoanh bounding box chi tiết ôm sát từng
+     vật thể bánh, đếm số mặt trưng bày (facings), và áp dụng cơ chế chấm điểm linh hoạt ("du di"
+     đạt tối thiểu X/Y SKU, ví dụ 1/2 hoặc 7/10 SKU).
+
+--------------------------------------------------------------------------------
+2. CẤU TRÚC THƯ MỤC VÀ FILE DỰ ÁN
+--------------------------------------------------------------------------------
+dms-display-scorer/
+├── .venv/                         # Môi trường ảo Python (đã cài: ultralytics, torch, cv2, pillow)
+├── Mo_Tool_DMS.command            # File click đúp chạy tool 1 chạm trên macOS
+├── Mo_Tool_DMS.bat                # File click đúp chạy tool 1 chạm trên Windows
+├── app.py                         # Single-file server HTTP + REST API + Giao diện Web GUI 3 Tab
+├── models/
+│   └── shelf_yolov8.pt            # Pretrained YOLOv8 nhận diện hàng hóa trên kệ (từ HuggingFace)
+├── src/
+│   ├── dms_ingest_display.py      # Core client tải ảnh từ DMS (vượt login CAS, phân trang)
+│   ├── tier1_antifraud.py         # Quét Moiré FFT màn hình + Blur Laplacian
+│   ├── tier2_cv.py                # Động cơ Computer Vision nhận diện SKU & đếm Facings (CẦN HOÀN THIỆN)
+│   └── tier3_rules.py             # Động cơ đánh giá quy tắc & ngưỡng "du di"
+└── data/
+    ├── configs/
+    │   └── programs_config.json   # Cấu hình vĩnh viễn các chương trình, danh sách SKU & ngưỡng du di
+    ├── samples/                   # Ảnh mẫu bao bì chuẩn đã tải lên
+    │   └── 873_TRUNGBAYBANHTUOIT102026/
+    │       ├── STAFF_CHABONG_60G/Cha-Bong-60g-scaled.png      # Ảnh PNG trong suốt tách nền
+    │       └── STAFF_SANDWICH_275G/Sandwich-275g-scaled.png  # Ảnh PNG trong suốt tách nền
+    └── displays/
+        └── 01102026-07102026/
+            └── 873_TRUNGBAYBANHTUOIT102026/                  # Dữ liệu ảnh thực tế đã tải (89 ảnh)
+                ├── full/                                      # Thư mục chứa ảnh gốc JPG
+                ├── records.json                               # Raw metadata từ DMS
+                ├── tier1.json                                 # Kết quả tính GPS + CDN URL
+                ├── tier2.json                                 # Kết quả nhận diện sản phẩm của AI
+                ├── antifraud.json                             # Kết quả quét Moiré
+                ├── review_notes.json                          # Ghi chú nhận xét của giám sát
+                └── dhash_cache.json                           # Cache mã băm dHash chống trùng
+
+--------------------------------------------------------------------------------
+3. CÁC TÍNH NĂNG ĐÃ HOÀN THÀNH (PHASE 1)
+--------------------------------------------------------------------------------
+1. Ingest DMS tự động:
+   - Đăng nhập CAS, tự động phân trang endpoint POST /images/get-images-for-popup.
+   - Tải ảnh đa luồng CDN (ThreadPoolExecutor, 8 workers).
+   - Lưu trữ có cấu trúc theo ngày/tháng/chương trình.
+2. Kiểm tra Tầng 1 (Chống gian lận):
+   - Khoảng cách GPS Haversine giữa tọa độ chụp ảnh và tọa độ khách hàng (Đạt <= 100m, Cảnh báo 100m-200m, Loại > 200m).
+   - Phát hiện chụp lại màn hình qua phân tích phổ Fourier FFT Moiré (ngưỡng 0.8).
+   - Phát hiện Trùng ảnh đa điểm bán (Cross-Store Duplicate Detection): Thuật toán 64-bit dHash bất biến góc xoay (0° và 180°), phát hiện điểm bán A nộp trùng ảnh với điểm bán B (khoảng cách Hamming <= 2 bits).
+3. Giao diện Web GUI cục bộ (app.py chạy tại http://127.0.0.1:8888):
+   - Tab 1 (Tải ảnh): Tìm kiếm chương trình, chọn nhiều chương trình, thanh tiến trình và real-time logs.
+   - Tab 2 (Bảng chấm & Soi AI): Bảng dữ liệu chi tiết, bộ lọc trạng thái đa chiều, ô ghi chú thẩm định tự lưu, modal so sánh 2 ảnh trùng lặp bên cạnh nhau, xuất báo cáo Excel (CSV) đầy đủ.
+   - Tab 3 (Cấu hình SKU & Quy tắc): Giao diện slider chọn ngưỡng du di (ví dụ 1/2 SKU), thêm/xóa SKU, nút upload ảnh bao bì mẫu trực tiếp từ trình duyệt kèm xem trước tức thì.
+
+--------------------------------------------------------------------------------
+4. CÁC YÊU CẦU CHI TIẾT CỦA NGƯỜI DÙNG ĐỐI VỚI PHASE 2 (COMPUTER VISION)
+--------------------------------------------------------------------------------
+- Chương trình mục tiêu hiện tại: 873_TRUNGBAYBANHTUOIT102026 (Bánh tươi T10/2026).
+- 2 SKU mục tiêu cần nhận diện:
+  1. STAFF_CHABONG_60G - Bánh mì Chà Bông Staff 60g:
+     Bao bì vàng rực, logo Staff xanh dương, ổ bánh mì kẹp ruốc chà bông màu nâu đậm ở chính giữa bao bì.
+  2. STAFF_SANDWICH_275G - Bánh mì Sandwich Staff 275g:
+     Bịch vuông dài, đáy túi có dải banner màu đỏ viền trắng in chữ Staff, thân bịch trong suốt thấy ruột bánh sandwich lát màu trắng kem, có nơ túm trên đầu.
+- Yêu cầu Bounding Box của người dùng:
+  - Phải khoanh box thật chi tiết và ôm sát từng vật thể bánh (từng facing).
+  - Không được vẽ các dải dài khổng lồ bao trùm cả kệ.
+  - Phân tách riêng từng ổ bánh khi các ổ xếp liền kề nhau trên cùng một khay/kệ.
+- Quy tắc phân loại sản phẩm trên kệ:
+  - Phải phân biệt được: Bánh mì Chà Bông Staff (vàng + ruốc nâu) với Bánh mì Phô mai (Staff Cheese - bao bì màu vàng nhưng có chữ "Cheese" màu xanh lớn và không có nhân ruốc chà bông nâu). Tuyệt đối không được tính bánh phô mai vào Chà Bông!
+  - Loại bỏ sản phẩm khác: Bánh socola (màu nâu), bánh lá dứa (màu xanh lá), bánh ngọt khác nằm ở các tầng giữa của kệ KHÔNG được nhận diện là sản phẩm của chương trình (khay giữa = 0).
+- Cơ chế "Du di" (Tier 3 Rule Engine):
+  - Cần tối thiểu min_skus_required (ví dụ 1 trên 2 SKU). Nếu tìm thấy >= 1 SKU -> Đạt (DAT_CHUAN nếu đủ 2/2, DAT_DU_DI nếu được 1/2). Nếu không có sản phẩm nào -> KHONG_DAT.
+
+--------------------------------------------------------------------------------
+5. NHỮNG LƯU Ý KỸ THUẬT & BÀI HỌC CẦN TRÁNH (QUAN TRỌNG NHẤT)
+--------------------------------------------------------------------------------
+1. KHÔNG DÙNG Heuristic màu sắc thô sơ (Color Thresholding):
+   - Sai lầm trước đó: Dùng thuật toán đếm pixel màu RGB/HSV chia lưới ô 16x16px để tránh cài thư viện.
+   - Hậu quả: Màu vàng của bánh phô mai và các vật thể màu vàng trên kệ bị gom chung vào Chà Bông; màu đỏ của Sandwich bị kéo thành các dải cột dọc to đùng khắp bức ảnh; không ôm sát vật thể bánh.
+   - Chỉ đạo dứt khoát của người dùng: Bắt buộc dùng Mô hình Hướng A (Deep Learning Object Detection như YOLO) để phát hiện vật thể và bám sát mép từng gói bánh.
+
+2. Xử lý triệt để bài toán ẢNH CHỤP BỊ XOAY NGANG 90°:
+   - Hiện tượng thực tế: Rất nhiều ảnh trên DMS (như ảnh siêu thị Aeon 8965179134056211) do nhân viên thị trường cầm điện thoại chụp ngang, nhưng file ảnh lưu trên server DMS không có cờ EXIF rotation (ảnh lưu kích thước 600x450 ngang, khiến các thanh kệ hàng và chữ "BÁNH DANISH" bị xoay ngang 90 độ, chạy dọc từ trên xuống dưới).
+   - Hậu quả nếu bỏ qua: Các thuật toán giả định kệ đứng sẽ bị "mù" hướng và quét sai toàn bộ bố cục kệ.
+   - Giải pháp bắt buộc:
+     a. Động cơ nhận diện AI phải chạy thử nghiệm hoặc tương thích xoay (hỗ trợ cả góc 0° và 90°).
+     b. Giao diện Web GUI (app.py) đã được thêm nút "🔄 Xoay 90°" (endpoint POST /api/rotate_image), bấm vào sẽ xoay vật lý file ảnh trên đĩa và kích hoạt AI chấm lại tức thì.
+
+3. Tránh lỗi SemLock / Multiprocessing trên macOS Sandbox:
+   - Môi trường chạy là Apple Silicon M4 trên macOS.
+   - Thư viện torch, torchvision, ultralytics, opencv-python-headless, pillow đã được cài vào .venv/.
+   - Khi huấn luyện hoặc load DataLoader trong ultralytics, macOS Sandbox sẽ chặn _multiprocessing.SemLock nếu workers > 0 gây lỗi PermissionError: [Errno 1] Operation not permitted. Do đó luôn phải đặt workers=0 nếu chạy script huấn luyện cục bộ.
+
+4. Tránh Hardcode tọa độ điểm ảnh:
+   - Không được viết code cố định vị trí như x in [190, 280] hay y in [40, 420] vì mỗi bức ảnh chụp tại các cửa hàng tạp hóa khác nhau có vị trí xếp kệ, góc chụp và khoảng cách hoàn toàn khác nhau.
+   - Mô hình phải tự động tìm kiếm vị trí vật thể (Localize) khắp toàn bộ không gian ảnh.
+
+5. Đã có sẵn 2 ảnh mẫu bao bì chuẩn chất lượng cao:
+   - 2 ảnh bao bì mẫu người dùng đã upload thành công và nằm tại:
+     * data/samples/873_TRUNGBAYBANHTUOIT102026/STAFF_CHABONG_60G/Cha-Bong-60g-scaled.png
+       (Kích thước 2560x1440, kênh Alpha trong suốt, bao bì thật nằm tại x=[870, 1685], y=[63, 1427], tỷ lệ 1.67 : 1).
+     * data/samples/873_TRUNGBAYBANHTUOIT102026/STAFF_SANDWICH_275G/Sandwich-275g-scaled.png
+       (Kích thước 2560x1440, kênh Alpha trong suốt, bao bì thật nằm tại x=[894, 1752], y=[30, 1407], tỷ lệ 1.60 : 1).
+   - Đã có sẵn mô hình models/shelf_yolov8.pt tải từ Hugging Face chuyên phát hiện vật thể bao bì hàng hóa trên kệ siêu thị (product).
+
+--------------------------------------------------------------------------------
+6. NHIỆM VỤ CẦN AI TIẾP THEO THỰC HIỆN (NEXT ACTION PLAN)
+--------------------------------------------------------------------------------
+1. Hoàn thiện pipeline nhận diện Deep Learning tại src/tier2_cv.py:
+   - Bước 1 (Proposal): Dùng models/shelf_yolov8.pt hoặc mô hình YOLO để đề xuất vị trí các gói hàng hóa trên kệ (bboxes). Bounding box từ YOLO sẽ ôm sát từng gói bánh riêng lẻ.
+   - Bước 2 (Classification): Cắt từng vùng ảnh gói bánh được phát hiện và phân loại bằng so khớp đặc trưng sâu / histogram đối chiếu với 2 ảnh mẫu bao bì đã trích xuất:
+     * Gói nào có nhân ruốc chà bông nâu + vàng rực -> gán nhãn STAFF_CHABONG_60G.
+     * Gói nào có đáy đỏ viền trắng chữ Staff + thân bánh sandwich lát -> gán nhãn STAFF_SANDWICH_275G.
+     * Gói nào là bánh phô mai (chữ Cheese to), bánh socola, bánh lá dứa -> bỏ qua (OTHER).
+2. Kiểm tra trực quan trên ảnh Aeon mẫu:
+   - Ảnh: full_MT01null_4_TRUNGBAYBANHTUOIT102026_MT0109_20261007_1791341461181.jpg (ImageId 8965179134056211).
+   - Kết quả mong đợi chuẩn xác:
+     * Đúng 2 box Chà Bông ôm sát 2 gói bánh ở giữa khay trên.
+     * Đúng 8 box Sandwich ôm sát 8 ổ bánh ở khay dưới.
+     * Khay giữa = 0.
+3. Đảm bảo tính tương thích:
+   - Giữ nguyên launcher Mo_Tool_DMS.command để người dùng chỉ cần nhấp đúp chuột là tự động khởi động server bằng môi trường .venv và mở trình duyệt web.
+================================================================================
