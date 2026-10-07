@@ -3,5 +3,6 @@ __pycache__/
 records.json
 tier1.json
 full/
+data/
 D:/data/
 .env

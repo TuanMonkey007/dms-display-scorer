@@ -155,7 +155,9 @@ def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--from", dest="frm", required=True)
     ap.add_argument("--to", dest="to", required=True)
-    ap.add_argument("--out", default="D:/data/dms_display")
+    ap.add_argument("--out", default=os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "displays"),
+        help="thu muc output (mac dinh: <project>/data/displays, da gitignore)")
     ap.add_argument("--download", action="store_true")
     ap.add_argument("--max", type=int, default=20)
     ap.add_argument("--program", default=None, help="chi quet 1 displayProgrameId")
