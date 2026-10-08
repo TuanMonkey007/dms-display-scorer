@@ -15,13 +15,14 @@ import random
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import tier2_cv as T
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LABEL_DIR = os.path.join(BASE_DIR, "data", "labels")
-CROPS_DIR = os.path.join(LABEL_DIR, "crops")
+CROPS_DIR = os.path.join(LABEL_DIR, "crops")                  # crop chữ nhật quanh polygon (giống lúc suy luận)
+MASKED_DIR = os.path.join(LABEL_DIR, "crops_masked")          # cùng crop nhưng nền ngoài polygon tô xám
 STATE_FILE = os.path.join(LABEL_DIR, "state.json")
 CLF_FILE = os.path.join(BASE_DIR, "models", "clf.pt")
 OTHER = "OTHER"
@@ -81,8 +82,20 @@ def propose(display_root, rel_dir, image_id, force=False):
                   round(float(b[2]) / W, 4), round(float(b[3]) / H, 4)] for b in px]
         _proposal_cache[ck] = boxes
     preds = predict_boxes(path, boxes)
-    saved = _state().get(_key(rel_dir, image_id), [])
+    saved = []
+    for it in _state().get(_key(rel_dir, image_id), []):   # nhãn cũ (chỉ có box) -> polygon 4 đỉnh
+        poly = it.get("poly") or _box_to_poly(it["box"])
+        saved.append({"poly": poly, "label": it["label"]})
     return {"boxes": [{"box": b, "pred": p} for b, p in zip(boxes, preds)], "saved": saved}
+
+
+def _box_to_poly(b):
+    return [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]]
+
+
+def _poly_bbox(poly):
+    xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
+    return [min(xs), min(ys), max(xs), max(ys)]
 
 
 def _crop(pil, nb, pad=0.03):
@@ -92,8 +105,18 @@ def _crop(pil, nb, pad=0.03):
     return pil.crop((int(max(0, x1 - px)), int(max(0, y1 - py)), int(min(W, x2 + px)), int(min(H, y2 + py))))
 
 
+def _crop_masked(pil, poly, pad=0.03):
+    """Crop quanh polygon, phần ngoài polygon tô xám trung tính."""
+    W, H = pil.size
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).polygon([(x * W, y * H) for x, y in poly], fill=255)
+    bg = Image.new("RGB", (W, H), (128, 128, 128))
+    bg.paste(pil, (0, 0), mask)
+    return _crop(bg, _poly_bbox(poly), pad)
+
+
 def save_labels(display_root, rel_dir, image_id, items):
-    """items: [{box:[nx1,ny1,nx2,ny2], label:<sku_code|OTHER>}]; box bỏ qua = không có trong items."""
+    """items: [{poly:[[nx,ny],...], label:<sku_code|OTHER>}] (còn nhận {box:[...]} cũ). Box không có label thì bỏ qua."""
     prog_dir = os.path.join(display_root, rel_dir)
     t1 = json.load(open(os.path.join(prog_dir, "tier1.json"), encoding="utf-8"))
     item = next((t for t in t1 if str(t.get("imageId")) == str(image_id)), None)
@@ -101,22 +124,27 @@ def save_labels(display_root, rel_dir, image_id, items):
         raise FileNotFoundError("Không thấy ảnh")
     pil = Image.open(os.path.join(prog_dir, item["file"])).convert("RGB")
     # xoá crop cũ của ảnh này (gán lại thì thay thế)
-    for f in glob.glob(os.path.join(CROPS_DIR, "*", f"{image_id}_*.jpg")):
-        os.remove(f)
-    n = 0
+    for root in (CROPS_DIR, MASKED_DIR):
+        for f in glob.glob(os.path.join(root, "*", f"{image_id}_*.jpg")):
+            os.remove(f)
+    n, kept = 0, []
     for it in items:
         label = it.get("label")
-        if not label:
+        poly = it.get("poly") or (_box_to_poly(it["box"]) if it.get("box") else None)
+        if not label or not poly or len(poly) < 3:
             continue
-        d = os.path.join(CROPS_DIR, label.replace("/", "_"))
-        os.makedirs(d, exist_ok=True)
-        c = _crop(pil, it["box"])
+        poly = [[round(min(1.0, max(0.0, x)), 4), round(min(1.0, max(0.0, y)), 4)] for x, y in poly]
+        c = _crop(pil, _poly_bbox(poly))
         if min(c.size) < 12:
             continue
-        c.save(os.path.join(d, f"{image_id}_{n}.jpg"), quality=92)
+        sub = label.replace("/", "_")
+        for root, img in ((CROPS_DIR, c), (MASKED_DIR, _crop_masked(pil, poly))):
+            os.makedirs(os.path.join(root, sub), exist_ok=True)
+            img.save(os.path.join(root, sub, f"{image_id}_{n}.jpg"), quality=92)
+        kept.append({"poly": poly, "label": label})
         n += 1
     st = _state()
-    st[_key(rel_dir, image_id)] = [{"box": it["box"], "label": it["label"]} for it in items if it.get("label")]
+    st[_key(rel_dir, image_id)] = kept
     _save_state(st)
     return n
 
@@ -180,6 +208,11 @@ def train():
     y = torch.tensor([classes.index(l) for l in labels])
     X = _embed_paths(paths)
     Xf = _embed_paths(paths, flip=True)
+    # crop đã che nền (nếu có): chỉ dùng để học thêm, KHÔNG dùng để kiểm tra
+    mpaths = [p.replace(os.sep + "crops" + os.sep, os.sep + "crops_masked" + os.sep) for p in paths]
+    m_idx = [i for i, mp in enumerate(mpaths) if os.path.exists(mp)]
+    Xm = _embed_paths([mpaths[i] for i in m_idx]) if m_idx else torch.zeros(0, X.shape[1])
+    ym = y[m_idx] if m_idx else y[:0]
     # tập kiểm tra giữ lại (20%), chỉ khi mỗi lớp >= 6 crop
     random.seed(0)
     val_idx = []
@@ -193,7 +226,9 @@ def train():
     if len(val_idx) >= MIN_VAL_SAMPLES:
         vs = set(val_idx)
         tr = [i for i in range(len(y)) if i not in vs]
-        Xtr = torch.cat([X[tr], Xf[tr]]); ytr = torch.cat([y[tr], y[tr]])
+        trs = set(tr)
+        mk = [j for j, i in enumerate(m_idx) if i in trs]
+        Xtr = torch.cat([X[tr], Xf[tr], Xm[mk]]); ytr = torch.cat([y[tr], y[tr], ym[mk]])
         W, b = _fit(Xtr, ytr, len(classes))
         pred = (X[val_idx] @ W * 20 + b).argmax(1)
         ok = (pred == y[val_idx])
@@ -202,7 +237,7 @@ def train():
             m = (y[val_idx] == ci)
             if int(m.sum()):
                 per_class[c] = {"n": int(m.sum()), "acc": round(float(ok[m].float().mean()), 3)}
-    W, b = _fit(torch.cat([X, Xf]), torch.cat([y, y]), len(classes))
+    W, b = _fit(torch.cat([X, Xf, Xm]), torch.cat([y, y, ym]), len(classes))
     os.makedirs(os.path.dirname(CLF_FILE), exist_ok=True)
     torch.save({"classes": classes, "W": W, "b": b, "val_acc": val_acc, "n_train": len(y)}, CLF_FILE)
     T.reset_classifier()
